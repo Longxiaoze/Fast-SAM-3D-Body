@@ -4,5 +4,11 @@ __pycache__/
 *$py.class
 *.pyc
 
-/checkpoints
+# Ignore large model files but keep configs
+checkpoints/**/*.ckpt
+checkpoints/**/*.pt
+checkpoints/**/*.pth
+checkpoints/**/*.engine
+checkpoints/**/*.onnx
+
 /output

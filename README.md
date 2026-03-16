@@ -38,10 +38,10 @@ SAM 3D Body (3DB) achieves state-of-the-art accuracy in monocular 3D human mesh 
 
 ### Environment
 
-Please refer to [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) for environment setup, or use our conda environment:
+Please refer to [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) for environment setup, or use our setup script:
 
 ```bash
-conda env create -f environment.yaml
+bash setup_env.sh
 conda activate fast_sam_3d_body
 ```
 

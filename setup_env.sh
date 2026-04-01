@@ -3,14 +3,28 @@ set -e
 
 # === SAM 3D Body Environment Setup (following official guide) ===
 
-# Step 1: Create conda env
-conda create -n fast_sam_3d_body python=3.11 -y
 eval "$(conda shell.bash hook)"
-conda activate fast_sam_3d_body
 
-# Step 2: Install CUDA toolkit 12.4 (needed for detectron2 compilation)
-echo "=== Installing CUDA toolkit ==="
-conda install -c nvidia/label/cuda-12.4.0 cuda-toolkit -y
+# Step 1: Create or reuse conda env
+ENV_NAME=fast_sam_3d_body
+if conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
+    echo "=== Reusing existing conda env: $ENV_NAME ==="
+else
+    echo "=== Creating conda env: $ENV_NAME ==="
+    conda create -n "$ENV_NAME" python=3.11 -y
+fi
+conda activate "$ENV_NAME"
+
+# Step 2: Install a CUDA 12.4 build toolchain for PyTorch CUDA extensions.
+# This keeps the working leaner than the full cuda-toolkit meta-package while
+# still providing the dev headers Detectron2 needs (e.g. cusparse.h).
+echo "=== Installing CUDA compiler/runtime headers ==="
+conda install -c nvidia/label/cuda-12.4.0 cuda-nvcc cuda-cudart-dev cuda-libraries-dev ninja -y
+
+# Use the conda-provided CUDA toolchain for extension builds.
+export CUDA_HOME=$CONDA_PREFIX
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 
 # Step 3: Install PyTorch (CUDA 12.4)
 echo "=== Installing PyTorch ==="
@@ -27,7 +41,6 @@ pip install pytorch-lightning pyrender opencv-python yacs scikit-image einops ti
 
 # Step 5: Install Detectron2
 echo "=== Installing Detectron2 ==="
-export CUDA_HOME=$CONDA_PREFIX
 pip install 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' \
     --no-build-isolation --no-deps
 
@@ -39,15 +52,26 @@ pip install ultralytics
 echo "=== Installing MoGe ==="
 pip install git+https://github.com/microsoft/MoGe.git
 
-# Step 8: Install TensorRT + ONNX (optional, for .engine model conversion)
-echo "=== Installing TensorRT & ONNX ==="
-pip install tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs onnx onnxruntime-gpu nvtx
+# Step 8: Install ONNX tools
+echo "=== Installing ONNX tools ==="
+pip install onnx onnxruntime-gpu nvtx
+
+# Step 9: Install TensorRT
+# TensorRT wheels are large and are hosted on NVIDIA's Python index.
+# Set INSTALL_TENSORRT=0 to skip this step when engine conversion is not needed.
+if [ "${INSTALL_TENSORRT:-1}" = "1" ]; then
+    echo "=== Installing TensorRT from NVIDIA Python index (large download) ==="
+    pip install --extra-index-url https://pypi.nvidia.com \
+        tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs
+else
+    echo "=== Skipping TensorRT (optional). Set INSTALL_TENSORRT=1 to enable ==="
+fi
 
 
 pip install smplx numpy scipy opencv-python tqdm pyzmq pyrealsense2
 pip install chumpy --no-build-isolation
 
-# Step 9: Install SAM3 (optional, uncomment if needed)
+# Step 10: Install SAM3 (optional, uncomment if needed)
 # echo "=== Installing SAM3 ==="
 # cd /tmp
 # rm -rf sam3

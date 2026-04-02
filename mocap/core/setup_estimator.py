@@ -39,7 +39,14 @@ def build_default_estimator(
         model=yolo_model_path,
     )
 
-    fov_estimator = FOVEstimator(name="moge2", device=device)
+    fov_estimator = FOVEstimator(
+        name="moge2",
+        device=device,
+        model_size=fov_model_size,
+        resolution_level=fov_resolution_level,
+        fixed_size=fov_fixed_size,
+        fast_mode=fov_fast_mode,
+    )
 
     return SAM3DBodyEstimator(
         sam_3d_body_model=model,

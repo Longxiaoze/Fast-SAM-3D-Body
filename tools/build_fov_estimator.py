@@ -12,11 +12,6 @@ import torch
 # FOV_SIZE: Optional, pre-resize input image size (reduces data transfer, 0=no resize)
 # FOV_FAST: Enable fast mode, skip normal_head (can only skip normal, since intrinsics depends on points/mask)
 # FOV_TRT: Use TensorRT to accelerate encoder (requires running convert_moge_encoder_trt.py first)
-FOV_MODEL = os.environ.get("FOV_MODEL", "l")  # s, b, l
-FOV_LEVEL = os.environ.get("FOV_LEVEL", "")
-FOV_SIZE = int(os.environ.get("FOV_SIZE", "0"))  # 0 = no resize, keep original image
-FOV_FAST = os.environ.get("FOV_FAST", "0") == "1"  # 1 = fast mode
-FOV_TRT = os.environ.get("FOV_TRT", "0") == "1"  # 1 = use TensorRT encoder
 
 MOGE_MODELS = {
     "s": "Ruicheng/moge-2-vits-normal",  # 35M params
@@ -91,11 +86,19 @@ class TRTEncoderWrapper:
 class FOVEstimator:
     def __init__(self, name="moge2", device="cuda", **kwargs):
         self.device = device
-        self.fixed_size = FOV_SIZE
-        self.resolution_level = int(FOV_LEVEL) if FOV_LEVEL else 9  # default 9
-        self.model_size = FOV_MODEL
-        self.fast_mode = FOV_FAST
-        self.use_trt = FOV_TRT
+        env_level = os.environ.get("FOV_LEVEL", "")
+
+        self.fixed_size = int(kwargs.pop("fixed_size", os.environ.get("FOV_SIZE", "0")))
+        self.resolution_level = int(
+            kwargs.pop("resolution_level", env_level if env_level else 9)
+        )
+        self.model_size = str(kwargs.pop("model_size", os.environ.get("FOV_MODEL", "l")))
+        self.fast_mode = bool(
+            kwargs.pop("fast_mode", os.environ.get("FOV_FAST", "0") == "1")
+        )
+        self.use_trt = bool(
+            kwargs.pop("use_trt", os.environ.get("FOV_TRT", "0") == "1")
+        )
 
         # TRT encoder requires fixed 512x512 input
         if self.use_trt and self.fixed_size == 0:

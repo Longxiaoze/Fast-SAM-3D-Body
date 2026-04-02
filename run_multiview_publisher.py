@@ -319,6 +319,7 @@ class RealtimeMultiViewPublisher:
         record=False,
         record_dir="output/records",
         device=None,
+        zmq_protocol_version=3,
     ):
         self.source = source
         self.main_camera = int(main_camera)
@@ -327,6 +328,7 @@ class RealtimeMultiViewPublisher:
         self.interpolate_lag_s = float(interpolate_lag_ms) / 1000.0
         self.min_person_confidence = float(min_person_confidence)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.zmq_protocol_version = int(zmq_protocol_version)
 
         self.camera_names = self.source.get_camera_names()
         self.cam_intrinsics = self.source.get_camera_intrinsics()
@@ -406,7 +408,10 @@ class RealtimeMultiViewPublisher:
         )
 
         self.interpolator = PoseInterpolator()
-        self.publisher = ZMQPublisher(addr)
+        self.publisher = ZMQPublisher(addr, protocol_version=self.zmq_protocol_version)
+        logger.info(
+            f"ZMQ publisher ready at {addr} using protocol v{self.zmq_protocol_version}"
+        )
         self.running = False
         self.video_ended = False
         self.capture_thread = None
@@ -1059,6 +1064,17 @@ def parse_args():
     parser.add_argument("--publish-hz", type=float, default=50.0)
     parser.add_argument("--interp-lag-ms", type=float, default=140.0)
     parser.add_argument("--addr", type=str, default="tcp://*:5556")
+    parser.add_argument(
+        "--zmq-protocol-version",
+        type=int,
+        default=3,
+        choices=[2, 3],
+        help=(
+            "Packed ZMQ protocol version. "
+            "Use 3 for official SONIC release configs; "
+            "use 2 only for custom SMPL-only subscribers."
+        ),
+    )
     parser.add_argument("--image-size", type=int, default=512, choices=[256, 384, 512])
     parser.add_argument("--yolo-model", type=str, default=YOLO_MODEL_PATH)
     parser.add_argument("--smpl-model-path", type=str, required=True)
@@ -1151,6 +1167,7 @@ def main():
         min_person_confidence=args.min_person_confidence,
         record=args.record,
         record_dir=args.record_dir,
+        zmq_protocol_version=args.zmq_protocol_version,
     )
 
     try:

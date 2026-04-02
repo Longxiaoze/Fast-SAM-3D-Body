@@ -13,5 +13,9 @@ checkpoints/**/*.onnx
 checkpoints/**/*.trt
 checkpoints/**/*.plan
 checkpoints/**/*_trt/
+checkpoints/*.npz
 
 /output
+checkpoints/sam-3d-body-dinov3/LICENSE
+checkpoints/mhr_face_mask.ply
+checkpoints/sam-3d-body-dinov3/README.md

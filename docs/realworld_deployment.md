@@ -28,6 +28,64 @@ python run_publisher.py \
     --record
 ```
 
+### Single-View From Recorded Video
+
+`run_publisher.py` also supports offline playback from a recorded mp4 while keeping the same SONIC ZMQ publish format as the live camera path.
+
+For videos recorded by this repo, pass the `record_realsense.py` JSON.
+For portrait D455 videos recorded by GENMO, you can pass the session `capture.json` directly.
+
+```bash
+python run_publisher.py \
+    --source video \
+    --video /path/to/session.mp4 \
+    --intrinsics /path/to/camera.json \
+    --smpl-model-path path/to/SMPL_NEUTRAL.pkl \
+    --nn-model-dir mhr2smpl/experiments/multiview_n30000_e500 \
+    --mhr2smpl-mapping-path path/to/mhr2smpl_mapping.npz \
+    --smoother-dir mhr2smpl/experiments/smoother_w5 \
+    --no-loop
+```
+
+To visualize the same offline publisher stream in Rerun while it publishes to SONIC:
+
+```bash
+python run_publisher.py \
+    --source video \
+    --video /path/to/session.mp4 \
+    --intrinsics /path/to/camera.json \
+    --smpl-model-path path/to/SMPL_NEUTRAL.pkl \
+    --nn-model-dir mhr2smpl/experiments/multiview_n30000_e500 \
+    --mhr2smpl-mapping-path path/to/mhr2smpl_mapping.npz \
+    --smoother-dir mhr2smpl/experiments/smoother_w5 \
+    --rerun \
+    --rerun-log-stride 2 \
+    --rerun-max-image-side 720 \
+    --rerun-mesh-overlay-stride 4 \
+    --rrd-output output/publisher_video.rrd \
+    --no-loop
+```
+
+For accurate SMPL-to-image alignment in Rerun, make sure the intrinsics file contains the real
+`fx`, `fy`, `cx`, and `cy` for the video stream. `run_publisher.py` will now use those exact
+intrinsics for the mesh overlay instead of a guessed square focal length.
+
+If runtime is still too slow on your machine, the fastest option is to disable the expensive 2D
+mesh overlay panel:
+
+```bash
+python run_publisher.py \
+    ... \
+    --rerun \
+    --no-rerun-mesh-overlay
+```
+
+Install Rerun once with:
+
+```bash
+pip install rerun-sdk==0.19.1
+```
+
 ### Multi-View (multiple RealSense cameras)
 
 ```bash
@@ -46,7 +104,11 @@ python run_multiview_publisher.py \
 
 ## Running SONIC
 
-The publisher streams SMPL-based poses over ZMQ using [Protocol v2](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/zmq.html#protocol-v2-smpl-based-encode-mode-2). Start SONIC pointing to the observation config below.
+Fast SAM 3D Body can stream SONIC-compatible motion over ZMQ.
+
+- For the official SONIC release observation config, use [Protocol v3](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/zmq.html#protocol-v3-joint-smpl-combined-encode-mode-2). The release encoder mode `smpl` requires `smpl_joints`, `smpl_pose`, and wrist joint observations.
+- [Protocol v2](https://nvlabs.github.io/GR00T-WholeBodyControl/tutorials/zmq.html#protocol-v2-smpl-based-encode-mode-2) is only for custom SMPL-only applications. The official SONIC docs explicitly note that v2 is not used by SONIC's built-in pipelines.
+- `run_publisher.py` and `run_multiview_publisher.py` now default to `--zmq-protocol-version 3` and publish neutral 29-DoF `joint_pos` / `joint_vel` arrays alongside the SMPL fields, which is enough for the stock SONIC release config to start. Use `--zmq-protocol-version 2` only if your receiver is a custom SMPL-only subscriber.
 
 ```bash
 # Simulation
@@ -135,6 +197,7 @@ encoder:
         - encoder_mode_4
         - smpl_joints_10frame_step1
         - smpl_anchor_orientation_10frame_step1
+        - motion_joint_positions_wrists_10frame_step1
 ```
 
 </details>
@@ -152,3 +215,19 @@ python debug_smpl_stream.py \
     --render-output output/smpl_debug.mp4 \
     --show-joints
 ```
+
+To inspect an offline RGB recording with Fast SAM 3D Body in Rerun, use `demo_video_rerun.py`:
+
+```bash
+python demo_video_rerun.py \
+    --video_path /path/to/video.mp4 \
+    --detector yolo_pose \
+    --detector_model ./checkpoints/yolo/yolo11m-pose.engine \
+    --hand_box_source yolo_pose \
+    --num-frames 300 \
+    --rrd-output output/video_demo.rrd
+
+rerun output/video_demo.rrd
+```
+
+`--use-compile 0` is the default for this script so the first debug run reaches the first frame faster.

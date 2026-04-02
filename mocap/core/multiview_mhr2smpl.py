@@ -49,6 +49,23 @@ def _load_ply_faces(ply_path):
     return np.array(faces, dtype=np.int64)
 
 
+def _load_mhr_faces_from_jit(mhr_model_path):
+    import torch
+
+    mhr_model_path = Path(mhr_model_path)
+    if not mhr_model_path.is_file():
+        raise RuntimeError(f"MHR model not found: {mhr_model_path}")
+
+    mhr_model = torch.jit.load(str(mhr_model_path), map_location="cpu")
+    try:
+        faces = mhr_model.character_torch.mesh.faces
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"Failed to read mesh faces from TorchScript MHR model: {mhr_model_path}"
+        ) from exc
+    return np.asarray(faces.cpu().numpy(), dtype=np.int64)
+
+
 GO_DIM = 6
 POSE_DIM = 63
 BETAS_DIM = 10
@@ -140,6 +157,7 @@ class MultiViewFusionRunner:
         model_dir,
         mapping_path,
         mhr_mesh_path=None,
+        mhr_model_path=None,
         device=None,
         smoother_dir=None,
     ):
@@ -169,11 +187,15 @@ class MultiViewFusionRunner:
         if "mhr_vert_ids" in mapping:
             self._mhr_vert_ids = np.asarray(mapping["mhr_vert_ids"], dtype=np.int64)  # (6890, 3)
         elif "triangle_ids" in mapping:
-            if mhr_mesh_path is None:
+            if mhr_mesh_path is not None:
+                faces = _load_ply_faces(mhr_mesh_path)
+            elif mhr_model_path is not None:
+                faces = _load_mhr_faces_from_jit(mhr_model_path)
+            else:
                 raise RuntimeError(
-                    "Mapping file uses triangle_ids format: mhr_mesh_path (PLY) is required to expand it"
+                    "Mapping file uses triangle_ids format: either mhr_mesh_path (PLY) "
+                    "or mhr_model_path (mhr_model.pt) is required to expand it"
                 )
-            faces = _load_ply_faces(mhr_mesh_path)
             triangle_ids = np.asarray(mapping["triangle_ids"], dtype=np.int64)  # (6890,)
             self._mhr_vert_ids = faces[triangle_ids].astype(np.int64)           # (6890, 3)
         else:

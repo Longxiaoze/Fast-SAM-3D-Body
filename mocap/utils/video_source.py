@@ -7,6 +7,99 @@ from pathlib import Path
 import numpy as np
 
 
+def _rotate_intrinsics_90deg(camera_matrix, width, height, angle_deg_ccw):
+    angle_norm = int(round(float(angle_deg_ccw))) % 360
+    fx = float(camera_matrix[0, 0])
+    fy = float(camera_matrix[1, 1])
+    cx = float(camera_matrix[0, 2])
+    cy = float(camera_matrix[1, 2])
+
+    if angle_norm == 0:
+        out_w, out_h = int(width), int(height)
+        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
+    elif angle_norm == 90:
+        out_w, out_h = int(height), int(width)
+        K = np.array(
+            [[fy, 0.0, cy], [0.0, fx, width - 1.0 - cx], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+    elif angle_norm == 180:
+        out_w, out_h = int(width), int(height)
+        K = np.array(
+            [[fx, 0.0, width - 1.0 - cx], [0.0, fy, height - 1.0 - cy], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+    elif angle_norm == 270:
+        out_w, out_h = int(height), int(width)
+        K = np.array(
+            [[fy, 0.0, height - 1.0 - cy], [0.0, fx, cx], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported snap90 rotation angle: {angle_deg_ccw}. Expected multiples of 90 degrees."
+        )
+
+    return K, out_w, out_h
+
+
+def _load_intrinsics_metadata(intrinsics_path):
+    intrinsics_path = Path(intrinsics_path)
+    if not intrinsics_path.exists():
+        raise RuntimeError(f"Intrinsics JSON not found: {intrinsics_path}")
+
+    with open(intrinsics_path, "r") as f:
+        intrinsics_data = json.load(f)
+
+    if "camera_matrix" in intrinsics_data and "gravity" in intrinsics_data:
+        cam_matrix = np.array(intrinsics_data["camera_matrix"], dtype=np.float32)
+        gravity = np.array(intrinsics_data["gravity"], dtype=np.float64)
+        width = intrinsics_data.get("width")
+        height = intrinsics_data.get("height")
+        source_format = "camera_json"
+        return cam_matrix, gravity, width, height, source_format
+
+    if "color_intrinsics" in intrinsics_data and "imu_gravity_color" in intrinsics_data:
+        color_intrinsics = intrinsics_data["color_intrinsics"]
+        base_width = int(color_intrinsics["width"])
+        base_height = int(color_intrinsics["height"])
+        base_camera_matrix = np.array(
+            [
+                [float(color_intrinsics["fx"]), 0.0, float(color_intrinsics["ppx"])],
+                [0.0, float(color_intrinsics["fy"]), float(color_intrinsics["ppy"])],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        rotation_meta = intrinsics_data.get("image_rotation_locked")
+        if rotation_meta is not None:
+            mode = rotation_meta.get("mode", "snap90")
+            if mode != "snap90":
+                raise RuntimeError(
+                    "Only snap90 capture.json rotation is supported for offline video playback."
+                )
+            cam_matrix, width, height = _rotate_intrinsics_90deg(
+                base_camera_matrix,
+                base_width,
+                base_height,
+                rotation_meta.get("angle_deg_ccw", 0.0),
+            )
+        else:
+            cam_matrix = base_camera_matrix
+            width = int(intrinsics_data.get("output_width", base_width))
+            height = int(intrinsics_data.get("output_height", base_height))
+
+        gravity = np.array(intrinsics_data["imu_gravity_color"], dtype=np.float64)
+        source_format = "genmo_capture_json"
+        return cam_matrix, gravity, width, height, source_format
+
+    raise RuntimeError(
+        f"Unsupported intrinsics file format: {intrinsics_path}. "
+        "Expected either record_realsense camera.json or GENMO capture.json."
+    )
+
+
 class VideoSource(ABC):
     @abstractmethod
     def get_frame(self):
@@ -143,21 +236,16 @@ class VideoFileSource(VideoSource):
         print(f"  FPS: {self._fps:.1f}")
         print(f"  Total frames: {int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))}")
 
-        intrinsics_path = Path(intrinsics_path)
-        if not intrinsics_path.exists():
-            raise RuntimeError(f"Intrinsics JSON not found: {intrinsics_path}")
-
-        with open(intrinsics_path, "r") as f:
-            intrinsics_data = json.load(f)
-
-        cam_matrix = np.array(intrinsics_data["camera_matrix"], dtype=np.float32)
+        cam_matrix, gravity, intr_width, intr_height, source_format = _load_intrinsics_metadata(
+            intrinsics_path
+        )
         self.cam_intrinsics = cam_matrix[None, ...]
-        print(f"  Loaded camera intrinsics from: {intrinsics_path}")
-        if "fx" in intrinsics_data:
-            print(f"    fx={intrinsics_data['fx']:.2f}, fy={intrinsics_data['fy']:.2f}")
-            print(f"    cx={intrinsics_data['cx']:.2f}, cy={intrinsics_data['cy']:.2f}")
+        print(f"  Loaded camera intrinsics from: {intrinsics_path} ({source_format})")
+        print(f"    fx={cam_matrix[0, 0]:.2f}, fy={cam_matrix[1, 1]:.2f}")
+        print(f"    cx={cam_matrix[0, 2]:.2f}, cy={cam_matrix[1, 2]:.2f}")
+        if intr_width is not None and intr_height is not None:
+            print(f"    intrinsics image size: {int(intr_width)}x{int(intr_height)}")
 
-        gravity = np.array(intrinsics_data["gravity"], dtype=np.float64)
         gravity_norm = np.linalg.norm(gravity)
         if gravity_norm < 1e-6:
             raise RuntimeError("Gravity magnitude is near zero - invalid data")

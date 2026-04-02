@@ -67,6 +67,32 @@ checkpoints/
 bash run_demo.sh
 ```
 
+### Video Demo With Rerun
+
+Install Rerun once in the environment:
+
+```bash
+pip install rerun-sdk==0.19.1
+```
+
+Run the offline video demo and save a `.rrd` recording for later playback:
+
+```bash
+python demo_video_rerun.py \
+    --video_path /path/to/video.mp4 \
+    --detector yolo_pose \
+    --detector_model ./checkpoints/yolo/yolo11m-pose.engine \
+    --hand_box_source yolo_pose \
+    --num-frames 300 \
+    --rrd-output output/video_demo.rrd
+```
+
+For a faster first-run debug loop, keep `--use-compile 0` (the default). To open the saved recording later:
+
+```bash
+rerun output/video_demo.rrd
+```
+
 ### TensorRT Acceleration (Optional)
 
 ```bash

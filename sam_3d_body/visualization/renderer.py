@@ -144,6 +144,21 @@ class Renderer:
         self.focal_length = focal_length
         self.faces = faces
 
+    def _split_focal_length(self):
+        focal = self.focal_length
+        if isinstance(focal, (tuple, list)):
+            if len(focal) == 2:
+                return float(focal[0]), float(focal[1])
+            if len(focal) == 1:
+                return float(focal[0]), float(focal[0])
+        if isinstance(focal, np.ndarray):
+            flat = focal.reshape(-1)
+            if flat.size >= 2:
+                return float(flat[0]), float(flat[1])
+            if flat.size == 1:
+                return float(flat[0]), float(flat[0])
+        return float(focal), float(focal)
+
     def __call__(
         self,
         vertices: np.array,
@@ -220,9 +235,10 @@ class Renderer:
         camera_pose[:3, 3] = camera_translation
         if camera_center is None:
             camera_center = [image.shape[1] / 2.0, image.shape[0] / 2.0]
+        fx, fy = self._split_focal_length()
         camera = pyrender.IntrinsicsCamera(
-            fx=self.focal_length,
-            fy=self.focal_length,
+            fx=fx,
+            fy=fy,
             cx=camera_center[0],
             cy=camera_center[1],
             zfar=1e12,
@@ -329,9 +345,10 @@ class Renderer:
         camera_pose = np.eye(4)
         # camera_pose[:3, 3] = camera_translation
         camera_center = [render_res[0] / 2.0, render_res[1] / 2.0]
+        fx, fy = self._split_focal_length()
         camera = pyrender.IntrinsicsCamera(
-            fx=self.focal_length,
-            fy=self.focal_length,
+            fx=fx,
+            fy=fy,
             cx=camera_center[0],
             cy=camera_center[1],
             zfar=1e12,
@@ -399,9 +416,17 @@ class Renderer:
         # camera_pose[:3, 3] = camera_translation
         camera_center = [render_res[0] / 2.0, render_res[1] / 2.0]
         focal_length = focal_length if focal_length is not None else self.focal_length
+        if isinstance(focal_length, (tuple, list)):
+            fx, fy = float(focal_length[0]), float(focal_length[1])
+        elif isinstance(focal_length, np.ndarray):
+            flat = focal_length.reshape(-1)
+            fx = float(flat[0])
+            fy = float(flat[1] if flat.size >= 2 else flat[0])
+        else:
+            fx = fy = float(focal_length)
         camera = pyrender.IntrinsicsCamera(
-            fx=focal_length,
-            fy=focal_length,
+            fx=fx,
+            fy=fy,
             cx=camera_center[0],
             cy=camera_center[1],
             zfar=1e12,

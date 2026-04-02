@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 # Disable CUDA graphs for torch.compile in multi-threaded environment
 os.environ.setdefault("TORCHINDUCTOR_CUDAGRAPH_TREES", "0")
@@ -35,6 +36,8 @@ from mocap.realtime.interpolator import PoseInterpolator
 from mocap.realtime.publisher import ZMQPublisher
 from mocap.core.setup_estimator import build_default_estimator
 from mocap.utils.pose_protocol import prepare_publish_pose
+from mocap.utils.rerun_visualizer import RerunVisualizer
+from mocap.utils.upright_leveler import InitialUprightLeveler
 from mocap.utils.video_source import create_video_source
 
 
@@ -43,6 +46,7 @@ FOV_RESOLUTION_LEVEL = 0
 FOV_FIXED_SIZE = 512
 FOV_FAST_MODE = True
 YOLO_MODEL_PATH = "checkpoints/yolo/yolo11m-pose.engine"
+MHR_MODEL_PATH = "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
 
 
 class RealtimePublisher:
@@ -55,6 +59,7 @@ class RealtimePublisher:
         multiview_model_dir,
         mhr2smpl_mapping_path,
         mhr_mesh_path=None,
+        mhr_model_path=MHR_MODEL_PATH,
         smoother_dir=None,
         addr="tcp://*:5556",
         image_size=512,
@@ -62,6 +67,17 @@ class RealtimePublisher:
         record=False,
         record_dir="output/records",
         min_person_confidence=0.75,
+        rerun=False,
+        rerun_session_name="fast_sam_3d_body_publisher",
+        rerun_spawn=True,
+        rerun_connect=None,
+        rrd_output="",
+        rerun_log_stride=2,
+        rerun_max_image_side=720,
+        rerun_mesh_overlay_stride=1,
+        rerun_mesh_overlay=True,
+        zmq_protocol_version=3,
+        imu_level_init_frames=15,
     ):
         logger.info("Initializing Realtime Publisher...")
         self.min_person_confidence = min_person_confidence
@@ -77,6 +93,15 @@ class RealtimePublisher:
         )
 
         self.video_source = video_source
+        frame_size = self.video_source.get_frame_size()
+        if frame_size is None:
+            self.frame_width, self.frame_height = 640, 480
+        else:
+            self.frame_width, self.frame_height = frame_size
+
+        self.rerun_viz = None
+        self._rerun_frame_idx = 0
+        self.rerun_log_stride = max(1, int(rerun_log_stride))
 
         logger.info("Warming up model...")
         self._warmup()
@@ -92,6 +117,30 @@ class RealtimePublisher:
         else:
             self.cam_intrinsics = None
             logger.warning("No camera intrinsics provided, will use FOV estimator")
+
+        if rerun:
+            logger.info("Initializing Rerun visualization...")
+            if rrd_output:
+                Path(rrd_output).parent.mkdir(parents=True, exist_ok=True)
+            self.rerun_viz = RerunVisualizer(
+                width=self.frame_width,
+                height=self.frame_height,
+                session_name=rerun_session_name,
+                cam_intrinsics=cam_intrinsics_np[0] if cam_intrinsics_np is not None else None,
+                spawn=rerun_spawn,
+                connect=rerun_connect,
+                rrd_output=rrd_output,
+                max_image_side=rerun_max_image_side,
+                mesh_overlay_stride=rerun_mesh_overlay_stride,
+                enable_mesh_overlay=rerun_mesh_overlay,
+            )
+            logger.info(
+                "Rerun visualization enabled "
+                f"(log_stride={self.rerun_log_stride}, "
+                f"max_side={rerun_max_image_side}, "
+                f"mesh_overlay_stride={rerun_mesh_overlay_stride}, "
+                f"mesh_overlay={'on' if rerun_mesh_overlay else 'off'})"
+            )
 
         self.gravity_direction = self.video_source.get_gravity_direction()
         logger.info(
@@ -144,6 +193,7 @@ class RealtimePublisher:
             model_dir=multiview_model_dir,
             mapping_path=mhr2smpl_mapping_path,
             mhr_mesh_path=mhr_mesh_path,
+            mhr_model_path=mhr_model_path,
             smoother_dir=smoother_dir,
         )
 
@@ -152,7 +202,18 @@ class RealtimePublisher:
         self.interpolate_lag_s = interpolate_lag_ms / 1000.0
 
         self.interpolator = PoseInterpolator()
-        self.publisher = ZMQPublisher(addr)
+        self.zmq_protocol_version = int(zmq_protocol_version)
+        self.publisher = ZMQPublisher(addr, protocol_version=self.zmq_protocol_version)
+        logger.info(
+            f"ZMQ publisher ready at {addr} using protocol v{self.zmq_protocol_version}"
+        )
+        self.upright_leveler = InitialUprightLeveler(imu_level_init_frames)
+        self._last_level_log_count = 0
+        if self.upright_leveler.enabled:
+            logger.info(
+                "Initial IMU-based upright leveling enabled "
+                f"({self.upright_leveler.calibration_frames} valid pose frames)"
+            )
 
         self._latest_frame = None
         self._latest_frame_lock = threading.Lock()
@@ -309,6 +370,7 @@ class RealtimePublisher:
             self.stats["inference_times"].append(infer_dt)
             self.stats["infer_total_time_s"] += infer_dt
             self.stats["infer_count"] += 1
+            self._maybe_log_rerun(frame, frame_rgb, outputs)
 
             num_persons = len(outputs)
             if num_persons != 1:
@@ -339,6 +401,31 @@ class RealtimePublisher:
             body_quat, smpl_joints, smpl_pose = self._prepare_publish_pose(
                 body_quat_xyzw, canonical_joints, smpl_pose
             )
+
+            if self.upright_leveler.enabled and not self.upright_leveler.ready:
+                self.upright_leveler.update(body_quat)
+                collected = self.upright_leveler.num_collected
+                if collected != self._last_level_log_count and (
+                    collected == 1
+                    or collected == self.upright_leveler.calibration_frames
+                    or collected % 5 == 0
+                ):
+                    logger.info(
+                        "Collecting initial upright calibration "
+                        f"({collected}/{self.upright_leveler.calibration_frames})"
+                    )
+                    self._last_level_log_count = collected
+                if self.upright_leveler.ready:
+                    logger.info(
+                        "Initial upright calibration locked "
+                        f"(removed ~{self.upright_leveler.estimated_tilt_deg:.2f} deg startup tilt)"
+                    )
+                else:
+                    continue
+
+            if self.upright_leveler.ready and self.upright_leveler.enabled:
+                body_quat = self.upright_leveler.apply(body_quat)
+
             convert_dt = time.perf_counter() - t0
             self.stats["convert_times"].append(convert_dt)
             self.stats["convert_total_time_s"] += convert_dt
@@ -360,6 +447,27 @@ class RealtimePublisher:
             with self._pose_clock_lock:
                 self._latest_pose_source_ts = frame_timestamp
                 self._latest_pose_perf_ts = time.perf_counter()
+
+    def _maybe_log_rerun(self, frame_bgr, frame_rgb, outputs):
+        if self.rerun_viz is None:
+            return
+        if self._rerun_frame_idx % self.rerun_log_stride != 0:
+            self._rerun_frame_idx += 1
+            return
+
+        try:
+            self.rerun_viz.log_frame(
+                frame_idx=self._rerun_frame_idx,
+                frame_bgr=frame_bgr,
+                frame_rgb=frame_rgb,
+                outputs=outputs,
+                faces=self.estimator.faces,
+            )
+            self._rerun_frame_idx += 1
+        except Exception as exc:
+            logger.warning(f"Disabling Rerun visualization after logging failure: {exc}")
+            self.rerun_viz.close()
+            self.rerun_viz = None
 
     def _compute_body_quat(self, global_rot):
         global_rot = np.asarray(global_rot, dtype=np.float64).reshape(3)
@@ -668,6 +776,10 @@ class RealtimePublisher:
 
         self._log_final_stats()
 
+        if self.rerun_viz is not None:
+            self.rerun_viz.close()
+            self.rerun_viz = None
+
         self.publisher.close()
         self._closed = True
 
@@ -689,7 +801,10 @@ def main():
     parser.add_argument(
         "--intrinsics",
         type=str,
-        help="Camera intrinsics JSON path (required for --source video)",
+        help=(
+            "Camera metadata path for --source video. "
+            "Supports record_realsense camera.json and GENMO capture.json."
+        ),
     )
     parser.add_argument(
         "--no-loop",
@@ -708,6 +823,27 @@ def main():
     )
     parser.add_argument(
         "--addr", type=str, default="tcp://*:5556", help="ZMQ bind address"
+    )
+    parser.add_argument(
+        "--imu-level-init-frames",
+        type=int,
+        default=15,
+        help=(
+            "Use the gravity-aligned RealSense frame to remove startup torso pitch/roll bias. "
+            "The publisher waits for this many valid pose frames before publishing. "
+            "Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--zmq-protocol-version",
+        type=int,
+        default=3,
+        choices=[2, 3],
+        help=(
+            "Packed ZMQ protocol version. "
+            "Use 3 for official SONIC release configs; "
+            "use 2 only for custom SMPL-only subscribers."
+        ),
     )
     parser.add_argument(
         "--image-size",
@@ -747,6 +883,15 @@ def main():
         help="Path to MHR mesh PLY (required when mapping uses triangle_ids format)",
     )
     parser.add_argument(
+        "--mhr-model-path",
+        type=str,
+        default=MHR_MODEL_PATH,
+        help=(
+            "Path to MHR TorchScript model. Used to recover mesh faces automatically "
+            "when the mapping file uses triangle_ids."
+        ),
+    )
+    parser.add_argument(
         "--smoother-dir",
         type=str,
         default=None,
@@ -773,12 +918,81 @@ def main():
             "are filtered out before the single-person safety check."
         ),
     )
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help="Enable Rerun visualization during publishing.",
+    )
+    parser.add_argument(
+        "--rerun-session-name",
+        type=str,
+        default="fast_sam_3d_body_publisher",
+        help="Rerun session name.",
+    )
+    parser.add_argument(
+        "--rerun-spawn",
+        dest="rerun_spawn",
+        action="store_true",
+        help="Spawn a local Rerun viewer.",
+    )
+    parser.add_argument(
+        "--no-rerun-spawn",
+        dest="rerun_spawn",
+        action="store_false",
+        help="Do not auto-spawn a local Rerun viewer.",
+    )
+    parser.add_argument(
+        "--rerun-connect",
+        type=str,
+        default=None,
+        help="Connect to an existing Rerun viewer, e.g. 127.0.0.1:9876.",
+    )
+    parser.add_argument(
+        "--rrd-output",
+        type=str,
+        default="",
+        help="Optional path to save the Rerun recording as a .rrd file.",
+    )
+    parser.add_argument(
+        "--rerun-log-stride",
+        type=int,
+        default=2,
+        help="Log one out of every N inference frames to Rerun.",
+    )
+    parser.add_argument(
+        "--rerun-max-image-side",
+        type=int,
+        default=720,
+        help="Downscale Rerun images so the largest side is at most this value. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--rerun-mesh-overlay-stride",
+        type=int,
+        default=1,
+        help="Render the 2D mesh overlay every N logged Rerun frames. Use values > 1 only to trade alignment fidelity for speed.",
+    )
+    parser.add_argument(
+        "--rerun-mesh-overlay",
+        dest="rerun_mesh_overlay",
+        action="store_true",
+        help="Enable the expensive 2D mesh overlay panel in Rerun.",
+    )
+    parser.add_argument(
+        "--no-rerun-mesh-overlay",
+        dest="rerun_mesh_overlay",
+        action="store_false",
+        help="Disable the expensive 2D mesh overlay panel in Rerun for faster runtime.",
+    )
+    parser.set_defaults(rerun_spawn=True)
+    parser.set_defaults(rerun_mesh_overlay=True)
     args = parser.parse_args()
 
     if args.publish_hz <= 0:
         parser.error("--publish-hz must be > 0")
     if args.interp_lag_ms < 0:
         parser.error("--interp-lag-ms must be >= 0")
+    if args.imu_level_init_frames < 0:
+        parser.error("--imu-level-init-frames must be >= 0")
 
     if args.source == "camera":
         video_source = create_video_source("camera", width=848, height=480, fps=30)
@@ -802,6 +1016,7 @@ def main():
         multiview_model_dir=args.nn_model_dir,
         mhr2smpl_mapping_path=args.mhr2smpl_mapping_path,
         mhr_mesh_path=args.mhr_mesh_path,
+        mhr_model_path=args.mhr_model_path,
         smoother_dir=args.smoother_dir,
         addr=args.addr,
         image_size=args.image_size,
@@ -809,6 +1024,17 @@ def main():
         record=args.record,
         record_dir=args.record_dir,
         min_person_confidence=args.min_person_confidence,
+        rerun=args.rerun,
+        rerun_session_name=args.rerun_session_name,
+        rerun_spawn=args.rerun_spawn,
+        rerun_connect=args.rerun_connect,
+        rrd_output=args.rrd_output,
+        rerun_log_stride=args.rerun_log_stride,
+        rerun_max_image_side=args.rerun_max_image_side,
+        rerun_mesh_overlay_stride=args.rerun_mesh_overlay_stride,
+        rerun_mesh_overlay=args.rerun_mesh_overlay,
+        zmq_protocol_version=args.zmq_protocol_version,
+        imu_level_init_frames=args.imu_level_init_frames,
     )
 
     try:

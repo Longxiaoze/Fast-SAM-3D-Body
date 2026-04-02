@@ -33,6 +33,7 @@ def _build_skeleton_links():
 
 
 SKELETON_LINKS = _build_skeleton_links()
+EXPECTED_MHR70_KEYPOINTS = len(mhr70_pose_info["keypoint_info"])
 
 
 def create_skeleton_visualizer():
@@ -314,24 +315,118 @@ class RerunVisualizer:
         )
         self._logged_frame_count += 1
 
+    def log_publish_state(
+        self,
+        *,
+        frame_idx,
+        timestamp=None,
+        status_name=None,
+        status_code=None,
+        publish_enabled=None,
+        num_persons=None,
+        body_quat=None,
+        smpl_joints=None,
+        smpl_pose=None,
+        joint_pos=None,
+        joint_vel=None,
+    ):
+        rr = self.rr
+        self._set_time_sequence_all("frame", int(frame_idx))
+
+        meta_kwargs = {}
+        if timestamp is not None:
+            meta_kwargs["timestamp"] = float(timestamp)
+        if status_name is not None:
+            meta_kwargs["status_name"] = str(status_name)
+        if status_code is not None:
+            meta_kwargs["status_code"] = int(status_code)
+        if publish_enabled is not None:
+            meta_kwargs["publish_enabled"] = bool(publish_enabled)
+        if num_persons is not None:
+            meta_kwargs["num_persons"] = int(num_persons)
+        if meta_kwargs:
+            self._log_all("world/sonic/meta", rr.AnyValues(**meta_kwargs))
+
+        if body_quat is not None:
+            body_quat = np.asarray(body_quat, dtype=np.float64).reshape(4)
+            self._log_all(
+                "world/sonic/body_quat_wxyz",
+                rr.AnyValues(
+                    w=float(body_quat[0]),
+                    x=float(body_quat[1]),
+                    y=float(body_quat[2]),
+                    z=float(body_quat[3]),
+                ),
+            )
+            self._log_all(
+                "world/sonic/root",
+                rr.Transform3D(
+                    translation=[0.0, 0.0, 0.0],
+                    quaternion=rr.Quaternion(
+                        xyzw=[
+                            float(body_quat[1]),
+                            float(body_quat[2]),
+                            float(body_quat[3]),
+                            float(body_quat[0]),
+                        ]
+                    ),
+                ),
+            )
+
+        if smpl_joints is not None:
+            smpl_joints = np.asarray(smpl_joints, dtype=np.float32).reshape(-1, 3)
+            self._log_all(
+                "world/sonic/smpl_joints_local",
+                rr.Points3D(smpl_joints),
+            )
+            self._log_all(
+                "world/sonic/smpl_joints_local_tensor",
+                rr.Tensor(np.asarray(smpl_joints, dtype=np.float32)),
+            )
+
+        if smpl_pose is not None:
+            self._log_all(
+                "world/sonic/smpl_pose_axis_angle",
+                rr.Tensor(np.asarray(smpl_pose, dtype=np.float32)),
+            )
+
+        if joint_pos is not None:
+            self._log_all(
+                "world/sonic/joint_pos",
+                rr.Tensor(np.asarray(joint_pos, dtype=np.float32)),
+            )
+
+        if joint_vel is not None:
+            self._log_all(
+                "world/sonic/joint_vel",
+                rr.Tensor(np.asarray(joint_vel, dtype=np.float32)),
+            )
+
     def _draw_2d_overlay_image(self, frame_bgr, outputs, *, camera_matrix, scale=1.0):
         overlay = frame_bgr.copy()
         for person_id, person in enumerate(outputs):
             keypoints_2d = self._project_keypoints_2d(person, camera_matrix)
             if keypoints_2d is None:
-                keypoints_2d = person["pred_keypoints_2d"]
+                keypoints_2d = person.get("pred_keypoints_2d")
                 if keypoints_2d is not None and len(keypoints_2d) > 0:
                     keypoints_2d = keypoints_2d.astype(np.float32, copy=True)
                     keypoints_2d *= scale
             if keypoints_2d is not None and len(keypoints_2d) > 0:
-                keypoints_2d_vis = np.concatenate(
-                    [
+                if keypoints_2d.shape[0] == EXPECTED_MHR70_KEYPOINTS:
+                    keypoints_2d_vis = np.concatenate(
+                        [
+                            keypoints_2d,
+                            np.ones((keypoints_2d.shape[0], 1), dtype=np.float32),
+                        ],
+                        axis=-1,
+                    )
+                    overlay = self.visualizer.draw_skeleton(overlay, keypoints_2d_vis)
+                else:
+                    overlay = self._draw_generic_keypoints(
+                        overlay,
                         keypoints_2d,
-                        np.ones((keypoints_2d.shape[0], 1), dtype=np.float32),
-                    ],
-                    axis=-1,
-                )
-                overlay = self.visualizer.draw_skeleton(overlay, keypoints_2d_vis)
+                        PERSON_COLORS[person_id % len(PERSON_COLORS)],
+                    )
 
             bbox = person.get("bbox")
             if bbox is not None:
@@ -367,6 +462,19 @@ class RerunVisualizer:
                 )
 
         return overlay
+
+    def _draw_generic_keypoints(self, image, keypoints_2d, color):
+        out = image.copy()
+        color_bgr = tuple(int(c) for c in color.tolist())
+        h, w = out.shape[:2]
+        for point in np.asarray(keypoints_2d, dtype=np.float32):
+            if np.any(np.isnan(point)):
+                continue
+            x = int(round(float(point[0])))
+            y = int(round(float(point[1])))
+            if 0 <= x < w and 0 <= y < h:
+                cv2.circle(out, (x, y), 3, color_bgr, -1, cv2.LINE_AA)
+        return out
 
     def _render_mesh_overlay_image(self, frame_bgr, outputs, faces, camera_matrix):
         if not outputs:
@@ -442,6 +550,9 @@ class RerunVisualizer:
 
             points_all.append(joints_world)
             point_colors_all.append(np.tile(color[None, :], (joints_world.shape[0], 1)))
+
+            if joints_world.shape[0] != EXPECTED_MHR70_KEYPOINTS:
+                continue
 
             for start_idx, end_idx in SKELETON_LINKS:
                 if start_idx >= joints_world.shape[0] or end_idx >= joints_world.shape[0]:

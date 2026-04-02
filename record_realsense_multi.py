@@ -8,6 +8,31 @@ import numpy as np
 import pyrealsense2 as rs
 
 
+def _open_video_writer(base_path: Path, fps: int, width: int, height: int):
+    candidates = [
+        ("avc1", ".mp4"),
+        ("mp4v", ".mp4"),
+        ("MJPG", ".avi"),
+        ("XVID", ".avi"),
+    ]
+
+    for codec, suffix in candidates:
+        video_path = base_path.with_suffix(suffix)
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(str(video_path), fourcc, fps, (width, height))
+        if writer.isOpened():
+            return writer, video_path, codec
+        writer.release()
+        video_path.unlink(missing_ok=True)
+
+    tried = ", ".join(f"{codec}{suffix}" for codec, suffix in candidates)
+    raise RuntimeError(
+        "Failed to open video writer. "
+        f"Tried: {tried}. "
+        "Install a compatible ffmpeg/gstreamer codec or use a build of OpenCV with mp4v/MJPG support."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Record RGB video from multiple RealSense D435i/D455 cameras"
@@ -46,7 +71,7 @@ def main():
     pipelines = {}
     writers = {}
     intrinsics_data = {}
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    video_paths = {}
 
     for i, dev in enumerate(devices):
         serial = dev.get_info(rs.camera_info.serial_number)
@@ -65,14 +90,17 @@ def main():
         except RuntimeError as e:
             raise RuntimeError(f"Failed to start pipeline for {serial}: {e}") from e
 
-        video_path = output_dir / f"{serial}.mp4"
-        writer = cv2.VideoWriter(str(video_path), fourcc, args.fps, (args.width, args.height))
-        if not writer.isOpened():
+        try:
+            writer, video_path, video_codec = _open_video_writer(
+                output_dir / serial, args.fps, args.width, args.height
+            )
+        except RuntimeError:
             pipe.stop()
-            raise RuntimeError(f"Failed to open video writer for {video_path}")
+            raise
 
         pipelines[serial] = pipe
         writers[serial] = writer
+        video_paths[serial] = video_path
 
         color_stream = profile.get_stream(rs.stream.color)
         intr = color_stream.as_video_stream_profile().get_intrinsics()
@@ -90,6 +118,8 @@ def main():
             ],
         }
         print(f"  Initialized {serial}")
+        print(f"    Video: {video_path}")
+        print(f"    Video codec: {video_codec}")
 
     print(f"\nCalibrating gravity ({args.imu_samples} samples per camera)...")
     accel_samples = {sn: [] for sn in pipelines}

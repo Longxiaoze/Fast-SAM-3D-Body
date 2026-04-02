@@ -8,6 +8,31 @@ import numpy as np
 import pyrealsense2 as rs
 
 
+def _open_video_writer(base_path: Path, fps: int, width: int, height: int):
+    candidates = [
+        ("avc1", ".mp4"),
+        ("mp4v", ".mp4"),
+        ("MJPG", ".avi"),
+        ("XVID", ".avi"),
+    ]
+
+    for codec, suffix in candidates:
+        video_path = base_path.with_suffix(suffix)
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(str(video_path), fourcc, fps, (width, height))
+        if writer.isOpened():
+            return writer, video_path, codec
+        writer.release()
+        video_path.unlink(missing_ok=True)
+
+    tried = ", ".join(f"{codec}{suffix}" for codec, suffix in candidates)
+    raise RuntimeError(
+        "Failed to open video writer. "
+        f"Tried: {tried}. "
+        "Install a compatible ffmpeg/gstreamer codec or use a build of OpenCV with mp4v/MJPG support."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Record RGB video from RealSense D435i/D455 with IMU gravity calibration"
@@ -35,7 +60,7 @@ def main():
     import time as _time
     output_dir = Path(args.output_dir) if args.output_dir else Path("output/records") / _time.strftime("%Y-%m-%d_%H-%M-%S")
     output_dir.mkdir(parents=True, exist_ok=True)
-    video_path = output_dir / "recording.mp4"
+    video_base_path = output_dir / "recording"
     intrinsics_path = output_dir / "recording.json"
 
     pipeline = rs.pipeline()
@@ -46,10 +71,9 @@ def main():
     config.enable_stream(rs.stream.accel)
     config.enable_stream(rs.stream.gyro)
 
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
-    out = cv2.VideoWriter(str(video_path), fourcc, args.fps, (args.width, args.height))
-    if not out.isOpened():
-        raise RuntimeError(f"Failed to open video writer for {video_path}")
+    out, video_path, video_codec = _open_video_writer(
+        video_base_path, args.fps, args.width, args.height
+    )
 
     profile = pipeline.start(config)
 
@@ -57,6 +81,7 @@ def main():
     intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
 
     print(f"Recording: {video_path} ({args.width}x{args.height} @ {args.fps}fps)")
+    print(f"Video codec: {video_codec}")
     print(
         f"Intrinsics: fx={intrinsics.fx:.1f}, fy={intrinsics.fy:.1f}, "
         f"cx={intrinsics.ppx:.1f}, cy={intrinsics.ppy:.1f}"

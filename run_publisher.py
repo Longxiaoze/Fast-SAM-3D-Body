@@ -33,6 +33,7 @@ from scipy.spatial.transform import Rotation
 from mocap.core.gravity_alignment import build_camera_to_world_rotation
 from mocap.core.multiview_mhr2smpl import MultiViewFusionRunner
 from mocap.realtime.interpolator import PoseInterpolator
+from mocap.realtime.offline_prediction_player import OfflinePredictionPublisher
 from mocap.realtime.publisher import ZMQPublisher
 from mocap.core.setup_estimator import build_default_estimator
 from mocap.utils.pose_protocol import prepare_publish_pose
@@ -792,11 +793,16 @@ def main():
         "--source",
         type=str,
         default="camera",
-        choices=["camera", "video"],
+        choices=["camera", "video", "prediction"],
         help="Video source type",
     )
     parser.add_argument(
         "--video", type=str, help="Path to video file (for --source video)"
+    )
+    parser.add_argument(
+        "--prediction-file",
+        type=str,
+        help="Path to offline prediction .npz file (for --source prediction)",
     )
     parser.add_argument(
         "--intrinsics",
@@ -861,19 +867,16 @@ def main():
     parser.add_argument(
         "--smpl-model-path",
         type=str,
-        required=True,
         help="SMPL model pickle file",
     )
     parser.add_argument(
         "--nn-model-dir",
         type=str,
-        required=True,
         help="NN fusion model directory (contains best_model.pth and sample_idx.npy)",
     )
     parser.add_argument(
         "--mhr2smpl-mapping-path",
         type=str,
-        required=True,
         help="Path to mhr2smpl_mapping.npz (mhr_vert_ids or triangle_ids format)",
     )
     parser.add_argument(
@@ -994,9 +997,52 @@ def main():
     if args.imu_level_init_frames < 0:
         parser.error("--imu-level-init-frames must be >= 0")
 
+    if args.source in ("camera", "video"):
+        missing_model_args = [
+            name
+            for name, value in (
+                ("--smpl-model-path", args.smpl_model_path),
+                ("--nn-model-dir", args.nn_model_dir),
+                ("--mhr2smpl-mapping-path", args.mhr2smpl_mapping_path),
+            )
+            if not value
+        ]
+        if missing_model_args:
+            parser.error(
+                f"{', '.join(missing_model_args)} required when --source is camera or video"
+            )
+
     if args.source == "camera":
         video_source = create_video_source("camera", width=848, height=480, fps=30)
-    else:
+        publisher = RealtimePublisher(
+            video_source=video_source,
+            publish_hz=args.publish_hz,
+            interpolate_lag_ms=args.interp_lag_ms,
+            smpl_model_path=args.smpl_model_path,
+            multiview_model_dir=args.nn_model_dir,
+            mhr2smpl_mapping_path=args.mhr2smpl_mapping_path,
+            mhr_mesh_path=args.mhr_mesh_path,
+            mhr_model_path=args.mhr_model_path,
+            smoother_dir=args.smoother_dir,
+            addr=args.addr,
+            image_size=args.image_size,
+            yolo_model_path=args.yolo_model,
+            record=args.record,
+            record_dir=args.record_dir,
+            min_person_confidence=args.min_person_confidence,
+            rerun=args.rerun,
+            rerun_session_name=args.rerun_session_name,
+            rerun_spawn=args.rerun_spawn,
+            rerun_connect=args.rerun_connect,
+            rrd_output=args.rrd_output,
+            rerun_log_stride=args.rerun_log_stride,
+            rerun_max_image_side=args.rerun_max_image_side,
+            rerun_mesh_overlay_stride=args.rerun_mesh_overlay_stride,
+            rerun_mesh_overlay=args.rerun_mesh_overlay,
+            zmq_protocol_version=args.zmq_protocol_version,
+            imu_level_init_frames=args.imu_level_init_frames,
+        )
+    elif args.source == "video":
         if not args.video:
             parser.error("--video required when --source video")
         if not args.intrinsics:
@@ -1007,35 +1053,56 @@ def main():
             intrinsics_path=args.intrinsics,
             loop=not args.no_loop,
         )
-
-    publisher = RealtimePublisher(
-        video_source=video_source,
-        publish_hz=args.publish_hz,
-        interpolate_lag_ms=args.interp_lag_ms,
-        smpl_model_path=args.smpl_model_path,
-        multiview_model_dir=args.nn_model_dir,
-        mhr2smpl_mapping_path=args.mhr2smpl_mapping_path,
-        mhr_mesh_path=args.mhr_mesh_path,
-        mhr_model_path=args.mhr_model_path,
-        smoother_dir=args.smoother_dir,
-        addr=args.addr,
-        image_size=args.image_size,
-        yolo_model_path=args.yolo_model,
-        record=args.record,
-        record_dir=args.record_dir,
-        min_person_confidence=args.min_person_confidence,
-        rerun=args.rerun,
-        rerun_session_name=args.rerun_session_name,
-        rerun_spawn=args.rerun_spawn,
-        rerun_connect=args.rerun_connect,
-        rrd_output=args.rrd_output,
-        rerun_log_stride=args.rerun_log_stride,
-        rerun_max_image_side=args.rerun_max_image_side,
-        rerun_mesh_overlay_stride=args.rerun_mesh_overlay_stride,
-        rerun_mesh_overlay=args.rerun_mesh_overlay,
-        zmq_protocol_version=args.zmq_protocol_version,
-        imu_level_init_frames=args.imu_level_init_frames,
-    )
+        publisher = RealtimePublisher(
+            video_source=video_source,
+            publish_hz=args.publish_hz,
+            interpolate_lag_ms=args.interp_lag_ms,
+            smpl_model_path=args.smpl_model_path,
+            multiview_model_dir=args.nn_model_dir,
+            mhr2smpl_mapping_path=args.mhr2smpl_mapping_path,
+            mhr_mesh_path=args.mhr_mesh_path,
+            mhr_model_path=args.mhr_model_path,
+            smoother_dir=args.smoother_dir,
+            addr=args.addr,
+            image_size=args.image_size,
+            yolo_model_path=args.yolo_model,
+            record=args.record,
+            record_dir=args.record_dir,
+            min_person_confidence=args.min_person_confidence,
+            rerun=args.rerun,
+            rerun_session_name=args.rerun_session_name,
+            rerun_spawn=args.rerun_spawn,
+            rerun_connect=args.rerun_connect,
+            rrd_output=args.rrd_output,
+            rerun_log_stride=args.rerun_log_stride,
+            rerun_max_image_side=args.rerun_max_image_side,
+            rerun_mesh_overlay_stride=args.rerun_mesh_overlay_stride,
+            rerun_mesh_overlay=args.rerun_mesh_overlay,
+            zmq_protocol_version=args.zmq_protocol_version,
+            imu_level_init_frames=args.imu_level_init_frames,
+        )
+    else:
+        if not args.prediction_file:
+            parser.error("--prediction-file required when --source prediction")
+        if args.record:
+            parser.error("--record is not supported when --source prediction")
+        publisher = OfflinePredictionPublisher(
+            prediction_file=args.prediction_file,
+            publish_hz=args.publish_hz,
+            interpolate_lag_ms=args.interp_lag_ms,
+            addr=args.addr,
+            zmq_protocol_version=args.zmq_protocol_version,
+            rerun=args.rerun,
+            rerun_session_name=args.rerun_session_name,
+            rerun_spawn=args.rerun_spawn,
+            rerun_connect=args.rerun_connect,
+            rrd_output=args.rrd_output,
+            rerun_log_stride=args.rerun_log_stride,
+            rerun_max_image_side=args.rerun_max_image_side,
+            rerun_mesh_overlay_stride=args.rerun_mesh_overlay_stride,
+            rerun_mesh_overlay=args.rerun_mesh_overlay,
+            smpl_model_path=args.smpl_model_path,
+        )
 
     try:
         publisher.start()

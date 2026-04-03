@@ -79,9 +79,12 @@ class RealtimePublisher:
         rerun_mesh_overlay=True,
         zmq_protocol_version=3,
         imu_level_init_frames=15,
+        body_orient_source="joint_alignment",
     ):
         logger.info("Initializing Realtime Publisher...")
         self.min_person_confidence = min_person_confidence
+        self.body_orient_source = str(body_orient_source)
+        self._prev_body_quat_xyzw = None
 
         logger.info("Loading SAM 3D model...")
         self.estimator = build_default_estimator(
@@ -215,6 +218,7 @@ class RealtimePublisher:
                 "Initial IMU-based upright leveling enabled "
                 f"({self.upright_leveler.calibration_frames} valid pose frames)"
             )
+        logger.info(f"Body orientation source: {self.body_orient_source}")
 
         self._latest_frame = None
         self._latest_frame_lock = threading.Lock()
@@ -395,10 +399,10 @@ class RealtimePublisher:
                 continue
             pred_vertices = np.asarray(out["pred_vertices"], dtype=np.float32)
             pred_cam_t = np.asarray(out["pred_cam_t"], dtype=np.float32)
-            body_quat_xyzw = self._compute_body_quat(out["global_rot"])
             smpl_pose, canonical_joints, _betas, _weights = self.fusion_runner.infer(
                 [(pred_vertices, pred_cam_t)]
             )
+            body_quat_xyzw = self._estimate_body_quat_xyzw(out, canonical_joints)
             body_quat, smpl_joints, smpl_pose = self._prepare_publish_pose(
                 body_quat_xyzw, canonical_joints, smpl_pose
             )
@@ -475,6 +479,27 @@ class RealtimePublisher:
         rot = Rotation.from_euler("ZYX", global_rot)
         x180 = Rotation.from_euler("x", 180.0, degrees=True)
         return (x180 * rot).as_quat().astype(np.float64)
+
+    def _estimate_body_quat_xyzw(self, out, canonical_joints):
+        if self.body_orient_source == "joint_alignment":
+            try:
+                quat_xyzw = self.fusion_runner.estimate_body_quat_xyzw_from_joint_alignment(
+                    canonical_joints,
+                    out["pred_vertices"],
+                    out["pred_cam_t"],
+                    prev_quat_xyzw=self._prev_body_quat_xyzw,
+                )
+                self._prev_body_quat_xyzw = quat_xyzw
+                return quat_xyzw
+            except Exception as exc:
+                logger.warning(
+                    "Joint-alignment body orientation failed; "
+                    f"falling back to stage1_global_rot: {type(exc).__name__}: {exc}"
+                )
+
+        quat_xyzw = self._compute_body_quat(out["global_rot"])
+        self._prev_body_quat_xyzw = quat_xyzw
+        return quat_xyzw
 
     def _prepare_publish_pose(self, body_quat_xyzw, canonical_joints, smpl_pose):
         return prepare_publish_pose(
@@ -841,6 +866,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--body-orient-source",
+        type=str,
+        default="joint_alignment",
+        choices=["joint_alignment", "stage1_global_rot"],
+        help=(
+            "Root/body orientation source. "
+            "joint_alignment estimates orientation by aligning fused canonical joints "
+            "to Stage-1 observed joints; stage1_global_rot preserves the original behavior."
+        ),
+    )
+    parser.add_argument(
         "--zmq-protocol-version",
         type=int,
         default=3,
@@ -1041,6 +1077,7 @@ def main():
             rerun_mesh_overlay=args.rerun_mesh_overlay,
             zmq_protocol_version=args.zmq_protocol_version,
             imu_level_init_frames=args.imu_level_init_frames,
+            body_orient_source=args.body_orient_source,
         )
     elif args.source == "video":
         if not args.video:
@@ -1080,6 +1117,7 @@ def main():
             rerun_mesh_overlay=args.rerun_mesh_overlay,
             zmq_protocol_version=args.zmq_protocol_version,
             imu_level_init_frames=args.imu_level_init_frames,
+            body_orient_source=args.body_orient_source,
         )
     else:
         if not args.prediction_file:

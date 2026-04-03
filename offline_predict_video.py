@@ -147,6 +147,17 @@ def parse_args():
         help="Number of valid pose frames used for initial upright leveling.",
     )
     parser.add_argument(
+        "--body-orient-source",
+        type=str,
+        default="joint_alignment",
+        choices=["joint_alignment", "stage1_global_rot"],
+        help=(
+            "Root/body orientation source. "
+            "joint_alignment estimates orientation by aligning fused canonical joints "
+            "to Stage-1 observed joints; stage1_global_rot preserves the original behavior."
+        ),
+    )
+    parser.add_argument(
         "--log-every",
         type=int,
         default=30,
@@ -269,6 +280,30 @@ def compute_body_quat(global_rot):
     return (x180 * rot).as_quat().astype(np.float64)
 
 
+def estimate_body_quat_xyzw(
+    fusion_runner,
+    out,
+    canonical_joints,
+    *,
+    body_orient_source,
+    prev_quat_xyzw=None,
+):
+    if body_orient_source == "joint_alignment":
+        try:
+            return fusion_runner.estimate_body_quat_xyzw_from_joint_alignment(
+                canonical_joints,
+                out["pred_vertices"],
+                out["pred_cam_t"],
+                prev_quat_xyzw=prev_quat_xyzw,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Joint-alignment body orientation failed; "
+                f"falling back to stage1_global_rot: {type(exc).__name__}: {exc}"
+            )
+    return compute_body_quat(out["global_rot"])
+
+
 def build_publish_rotation(gravity_direction):
     r_world_cam = build_camera_to_world_rotation(gravity_direction)
     r_zup_adjustment = np.array(
@@ -357,9 +392,11 @@ def main():
         mhr_model_path=args.mhr_model_path,
         smoother_dir=args.smoother_dir,
     )
+    logger.info(f"Body orientation source: {args.body_orient_source}")
 
     upright_leveler = InitialUprightLeveler(args.imu_level_init_frames)
     last_level_log_count = 0
+    prev_body_quat_xyzw = None
 
     timestamps = []
     frame_indices = []
@@ -472,12 +509,21 @@ def main():
                                 out["pred_vertices"], dtype=np.float32
                             )
                             pred_cam_t = np.asarray(out["pred_cam_t"], dtype=np.float32)
-                            body_quat_xyzw = compute_body_quat(out["global_rot"])
-                            camera_body_quat_xyzw = np.asarray(
-                                body_quat_xyzw, dtype=np.float64
-                            )
                             smpl_pose_pred, canonical_joints, _betas, _weights = (
                                 fusion_runner.infer([(pred_vertices, pred_cam_t)])
+                            )
+                            body_quat_xyzw = estimate_body_quat_xyzw(
+                                fusion_runner,
+                                out,
+                                canonical_joints,
+                                body_orient_source=args.body_orient_source,
+                                prev_quat_xyzw=prev_body_quat_xyzw,
+                            )
+                            prev_body_quat_xyzw = np.asarray(
+                                body_quat_xyzw, dtype=np.float64
+                            )
+                            camera_body_quat_xyzw = np.asarray(
+                                body_quat_xyzw, dtype=np.float64
                             )
                             body_quat, smpl_joint, smpl_pose = prepare_publish_pose(
                                 body_quat_xyzw,
@@ -613,6 +659,7 @@ def main():
         ),
         "gravity": gravity_direction,
         "imu_level_init_frames": int(args.imu_level_init_frames),
+        "body_orient_source": np.asarray(args.body_orient_source),
         "source_video": str(Path(args.video).resolve()),
         "source_intrinsics": str(Path(args.intrinsics).resolve()),
         "smpl_model_path": str(Path(args.smpl_model_path).resolve()),

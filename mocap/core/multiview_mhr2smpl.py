@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.spatial.transform import Rotation
 
 # chumpy (used by smplx to load .pkl models) has two compatibility issues with
 # modern Python/NumPy that must be patched before any smplx import:
@@ -210,12 +211,53 @@ class MultiViewFusionRunner:
         self._smpl.eval()
         for p in self._smpl.parameters():
             p.requires_grad_(False)
+        self._smpl_j_reg = self._smpl.J_regressor.detach().cpu().numpy().astype(np.float32)
 
         self._smoother = None
         self._smoother_buffer = None
         self._smoother_window_size = None
         if smoother_dir is not None:
             self._load_smoother(smoother_dir)
+
+    def observed_smpl_joints_from_mhr(self, pred_vertices, pred_cam_t):
+        """Map Stage-1 MHR mesh output to 24 SMPL joints in camera coordinates."""
+        verts = np.asarray(pred_vertices, dtype=np.float32)
+        cam_t = np.asarray(pred_cam_t, dtype=np.float32).reshape(3)
+        mhr_cam = verts + cam_t[None, :]
+        face_verts = mhr_cam[self._mhr_vert_ids]
+        smpl_verts = (face_verts * self._baryc[:, :, None]).sum(axis=1)
+        joints = self._smpl_j_reg @ smpl_verts
+        joints -= joints[0:1]
+        return joints.astype(np.float32)
+
+    def estimate_body_quat_xyzw_from_joint_alignment(
+        self,
+        canonical_joints,
+        pred_vertices,
+        pred_cam_t,
+        *,
+        prev_quat_xyzw=None,
+    ):
+        """Estimate body orientation by aligning canonical SMPL joints to observed MHR joints."""
+        canon = np.asarray(canonical_joints, dtype=np.float64).reshape(24, 3)
+        observed = self.observed_smpl_joints_from_mhr(pred_vertices, pred_cam_t).astype(
+            np.float64
+        )
+
+        # Ignore the pelvis/root and solve the best-fit proper rotation in camera space.
+        cov = canon[1:].T @ observed[1:]
+        u, _s, vt = np.linalg.svd(cov)
+        rot_mat = vt.T @ u.T
+        if np.linalg.det(rot_mat) < 0.0:
+            vt[-1, :] *= -1.0
+            rot_mat = vt.T @ u.T
+
+        quat_xyzw = Rotation.from_matrix(rot_mat).as_quat().astype(np.float64)
+        if prev_quat_xyzw is not None:
+            prev_quat_xyzw = np.asarray(prev_quat_xyzw, dtype=np.float64).reshape(4)
+            if np.dot(quat_xyzw, prev_quat_xyzw) < 0.0:
+                quat_xyzw = -quat_xyzw
+        return quat_xyzw
 
     def _load_smoother(self, smoother_dir):
         import json

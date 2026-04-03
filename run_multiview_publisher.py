@@ -320,6 +320,7 @@ class RealtimeMultiViewPublisher:
         record_dir="output/records",
         device=None,
         zmq_protocol_version=3,
+        body_orient_source="joint_alignment",
     ):
         self.source = source
         self.main_camera = int(main_camera)
@@ -329,6 +330,8 @@ class RealtimeMultiViewPublisher:
         self.min_person_confidence = float(min_person_confidence)
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.zmq_protocol_version = int(zmq_protocol_version)
+        self.body_orient_source = str(body_orient_source)
+        self._prev_body_quat_xyzw = None
 
         self.camera_names = self.source.get_camera_names()
         self.cam_intrinsics = self.source.get_camera_intrinsics()
@@ -345,6 +348,7 @@ class RealtimeMultiViewPublisher:
         logger.info(
             f"Using main camera index={self.main_camera} name={self.camera_names[self.main_camera]}"
         )
+        logger.info(f"Body orientation source: {self.body_orient_source}")
 
         self.R_world_cam = build_camera_to_world_rotation(
             self.gravity_directions[self.main_camera]
@@ -709,6 +713,27 @@ class RealtimeMultiViewPublisher:
         x180 = Rotation.from_euler("x", 180.0, degrees=True)
         return (x180 * rot).as_quat().astype(np.float64)
 
+    def _estimate_main_body_quat(self, main_out, canonical_joints):
+        if self.body_orient_source == "joint_alignment":
+            try:
+                quat_xyzw = self.fusion_runner.estimate_body_quat_xyzw_from_joint_alignment(
+                    canonical_joints,
+                    main_out["pred_vertices"],
+                    main_out["pred_cam_t"],
+                    prev_quat_xyzw=self._prev_body_quat_xyzw,
+                )
+                self._prev_body_quat_xyzw = quat_xyzw
+                return quat_xyzw
+            except Exception as exc:
+                logger.warning(
+                    "Joint-alignment body orientation failed; "
+                    f"falling back to stage1_global_rot: {type(exc).__name__}: {exc}"
+                )
+
+        quat_xyzw = self._compute_main_body_quat(main_out)
+        self._prev_body_quat_xyzw = quat_xyzw
+        return quat_xyzw
+
     def _prepare_publish_pose(self, body_quat_xyzw, canonical_joints, smpl_pose):
         return prepare_publish_pose(
             body_quat_xyzw,
@@ -804,9 +829,11 @@ class RealtimeMultiViewPublisher:
             stage1_total_s = sum(detect_times_s) + body_model_dt
             self.stats["stage1_body_ms"].append(body_model_dt * 1000.0)
             fusion_t0 = time.perf_counter()
-            body_quat_xyzw = self._compute_main_body_quat(outputs[self.main_camera])
             smpl_pose, canonical_joints, _betas, view_weights = (
                 self.fusion_runner.infer(valid_views)
+            )
+            body_quat_xyzw = self._estimate_main_body_quat(
+                outputs[self.main_camera], canonical_joints
             )
             body_quat, smpl_joints, smpl_pose = self._prepare_publish_pose(
                 body_quat_xyzw, canonical_joints, smpl_pose
@@ -1065,6 +1092,17 @@ def parse_args():
     parser.add_argument("--interp-lag-ms", type=float, default=140.0)
     parser.add_argument("--addr", type=str, default="tcp://*:5556")
     parser.add_argument(
+        "--body-orient-source",
+        type=str,
+        default="joint_alignment",
+        choices=["joint_alignment", "stage1_global_rot"],
+        help=(
+            "Root/body orientation source. "
+            "joint_alignment estimates orientation by aligning fused canonical joints "
+            "to Stage-1 observed joints; stage1_global_rot preserves the original behavior."
+        ),
+    )
+    parser.add_argument(
         "--zmq-protocol-version",
         type=int,
         default=3,
@@ -1168,6 +1206,7 @@ def main():
         record=args.record,
         record_dir=args.record_dir,
         zmq_protocol_version=args.zmq_protocol_version,
+        body_orient_source=args.body_orient_source,
     )
 
     try:

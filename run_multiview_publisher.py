@@ -1090,7 +1090,16 @@ def parse_args():
     )
     parser.add_argument("--publish-hz", type=float, default=50.0)
     parser.add_argument("--interp-lag-ms", type=float, default=140.0)
-    parser.add_argument("--addr", type=str, default="tcp://*:5556")
+    parser.add_argument(
+        "--addr",
+        type=str,
+        default="tcp://*:5556",
+        help=(
+            "ZMQ PUB bind address on this machine, e.g. tcp://*:5556. "
+            "If SONIC runs on another machine or the robot, keep this as a local bind "
+            "address and point the SONIC side --zmq-host to this publisher machine."
+        ),
+    )
     parser.add_argument(
         "--body-orient-source",
         type=str,

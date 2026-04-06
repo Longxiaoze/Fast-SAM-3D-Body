@@ -59,6 +59,12 @@ USE_COMPILE=0 python /home/techshare/liu_projects/Fast-SAM-3D-Body/run_publisher
     --addr tcp://*:5556
 ```
 
+Important:
+
+- `--addr` is the ZMQ publisher bind address on the machine running `run_publisher.py`.
+- If SONIC deploy runs on another machine or the real robot, do not set `--addr` to the robot IP.
+- Keep `--addr tcp://*:5556` here, and set `--zmq-host <publisher_machine_ip>` on the SONIC side instead.
+
 ## Offline Workflow
 
 ### Step 1: Record RealSense Video
@@ -210,6 +216,41 @@ techshare@techshare:~/liu_projects/unitree_projects/GR00T-WholeBodyControl/gear_
   --obs-config /home/techshare/liu_projects/Fast-SAM-3D-Body/configs/sonic/observation_config_smpl_anchor_only.yaml \
   sim
 ```
+
+### Actual Unitree G1 Robot On Another Machine
+
+If the camera / publisher machine is `192.168.0.155` and the Unitree robot machine is `192.168.0.79`:
+
+- Run the publisher on `192.168.0.155` with `--addr tcp://*:5556`
+- Run SONIC deploy on the robot with `--zmq-host 192.168.0.155`
+
+Example robot-side command for the real G1:
+
+```bash
+bash deploy.sh \
+  --input-type zmq \
+  --obs-config ~/observation_config_smpl_anchor_only.yaml \
+  --zmq-host 192.168.0.155 \
+  --zmq-port 5556 \
+  --zmq-topic pose \
+  real
+```
+
+If the robot machine also has this repo checked out at the same path, you can use:
+
+```bash
+bash deploy.sh \
+  --input-type zmq \
+  --obs-config /home/techshare/liu_projects/Fast-SAM-3D-Body/configs/sonic/observation_config_smpl_anchor_only.yaml \
+  --zmq-host 192.168.0.155 \
+  --zmq-port 5556 \
+  --zmq-topic pose \
+  real
+```
+
+If you want SONIC sim instead of the real robot, keep the same ZMQ arguments and change only the final mode from `real` to `sim`.
+
+Do not use `--addr tcp://192.168.0.79:5556` on the publisher side unless `192.168.0.79` is actually a local IP assigned to the machine running the publisher process.
 
 ## Result Files Summary
 

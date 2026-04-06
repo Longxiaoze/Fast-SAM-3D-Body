@@ -1,10 +1,74 @@
 import json
+import re
+import socket
 
 import numpy as np
 import zmq
 
 ZMQ_HEADER_SIZE = 1280
 SONIC_NUM_JOINTS = 29
+TCP_ADDR_RE = re.compile(r"^tcp://([^:]+):(\d+)$")
+
+
+def _collect_local_ipv4_candidates():
+    candidates = {"127.0.0.1"}
+
+    for host in (socket.gethostname(), socket.getfqdn(), "localhost"):
+        if not host:
+            continue
+        try:
+            _, _, addrs = socket.gethostbyname_ex(host)
+        except OSError:
+            continue
+        candidates.update(addr for addr in addrs if "." in addr)
+
+    for probe_host in ("8.8.8.8", "1.1.1.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((probe_host, 80))
+                candidates.add(sock.getsockname()[0])
+            break
+        except OSError:
+            continue
+
+    return sorted(candidates)
+
+
+def _format_bind_error_hint(addr, exc):
+    if "Cannot assign requested address" not in str(exc):
+        return None
+
+    match = TCP_ADDR_RE.match(addr)
+    if match is None:
+        return None
+
+    host, port = match.groups()
+    if host in {"*", "0.0.0.0", "localhost", "127.0.0.1"}:
+        return None
+
+    local_ipv4s = _collect_local_ipv4_candidates()
+    explicit_bind = None
+    for ip in local_ipv4s:
+        if not ip.startswith("127."):
+            explicit_bind = f"tcp://{ip}:{port}"
+            break
+
+    suggested_bind = f"tcp://*:{port}"
+    local_ip_text = ", ".join(local_ipv4s) if local_ipv4s else "unavailable"
+
+    message_lines = [
+        f"Failed to bind ZMQ PUB socket to {addr}: {exc}",
+        "`--addr` is the publisher bind address on the machine running this process, not the remote robot/subscriber address.",
+        f"Use `{suggested_bind}` here",
+    ]
+    if explicit_bind is not None:
+        message_lines[-1] += f" (or an explicit local interface like `{explicit_bind}`)"
+    message_lines[-1] += "."
+    message_lines.append(
+        "On the Unitree/SONIC side, set `--zmq-host` to this publisher machine's LAN IP instead."
+    )
+    message_lines.append(f"Detected local IPv4 candidates: {local_ip_text}")
+    return "\n".join(message_lines)
 
 
 class ZMQPublisher:
@@ -21,7 +85,15 @@ class ZMQPublisher:
         self.ctx = zmq.Context()
         self.sock = self.ctx.socket(zmq.PUB)
         self.sock.setsockopt(zmq.LINGER, 0)
-        self.sock.bind(addr)
+        try:
+            self.sock.bind(addr)
+        except zmq.ZMQError as exc:
+            hint = _format_bind_error_hint(addr, exc)
+            if hint is not None:
+                self.sock.close(0)
+                self.ctx.term()
+                raise RuntimeError(hint) from exc
+            raise
 
         self.topic = topic
         self.topic_bytes = topic.encode("utf-8")

@@ -853,7 +853,14 @@ def main():
         help="Interpolation lag in ms to make 10Hz inference interpolatable",
     )
     parser.add_argument(
-        "--addr", type=str, default="tcp://*:5556", help="ZMQ bind address"
+        "--addr",
+        type=str,
+        default="tcp://*:5556",
+        help=(
+            "ZMQ PUB bind address on this machine, e.g. tcp://*:5556. "
+            "If SONIC runs on another machine or the robot, keep this as a local bind "
+            "address and point the SONIC side --zmq-host to this publisher machine."
+        ),
     )
     parser.add_argument(
         "--imu-level-init-frames",

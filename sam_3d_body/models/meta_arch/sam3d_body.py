@@ -1923,7 +1923,7 @@ class SAM3DBody(BaseModel):
         This allows torch.compile to optimize across both decoder calls.
         """
         import os
-        _DEBUG_NAN_DECODERS = os.environ.get('DEBUG_NAN', '1') == '1'
+        _DEBUG_NAN_DECODERS = os.environ.get('DEBUG_NAN', '0') == '1'
 
         # DEBUG: Check inputs for NaN
         if _DEBUG_NAN_DECODERS:
@@ -2587,7 +2587,7 @@ class SAM3DBody(BaseModel):
         print("        [run_inference] Starting...")
 
         # DEBUG flag for NaN tracing
-        _DEBUG_NAN = os.environ.get('DEBUG_NAN', '1') == '1'
+        _DEBUG_NAN = os.environ.get('DEBUG_NAN', '0') == '1'
 
         height, width = img.shape[:2]
         cam_int = batch["cam_int"].clone()
@@ -2738,7 +2738,6 @@ class SAM3DBody(BaseModel):
             merged_output = {"mhr_hand": combined_output["mhr_hand"]}
 
             # DEBUG: Check for NaN in outputs after merged forward
-            _DEBUG_NAN = True
             if _DEBUG_NAN:
                 def check_nan(tensor, name):
                     if tensor is not None and torch.isnan(tensor).any():

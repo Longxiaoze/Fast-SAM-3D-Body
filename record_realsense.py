@@ -43,9 +43,9 @@ def main():
         default=None,
         help="Output directory (default: output/records/<timestamp>)",
     )
-    parser.add_argument("--width", type=int, default=848)
+    parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--fps", type=int, default=15)
     parser.add_argument(
         "--imu-samples",
         type=int,

@@ -125,13 +125,31 @@ class VideoSource(ABC):
 
 class RealSenseSource(VideoSource):
 
-    def __init__(self, width: int = 848, height: int = 480, fps: float = 30):
+    def __init__(
+        self,
+        width: int = 640,
+        height: int = 480,
+        fps: float = 15,
+        imu_samples: int = 100,
+        startup_timeout_s: float = 60.0,
+        frame_timeout_ms: int = 1000,
+    ):
         import pyrealsense2 as rs
 
         self.rs = rs
         self.width = int(width)
         self.height = int(height)
         self._fps = float(fps)
+        self.imu_samples = int(imu_samples)
+        self.startup_timeout_s = float(startup_timeout_s)
+        self.frame_timeout_ms = int(frame_timeout_ms)
+
+        if self.imu_samples <= 0:
+            raise ValueError("imu_samples must be > 0")
+        if self.startup_timeout_s <= 0:
+            raise ValueError("startup_timeout_s must be > 0")
+        if self.frame_timeout_ms <= 0:
+            raise ValueError("frame_timeout_ms must be > 0")
 
         self.pipeline = rs.pipeline()
         config = rs.config()
@@ -142,40 +160,104 @@ class RealSenseSource(VideoSource):
         # Enable IMU for gravity calibration
         config.enable_stream(rs.stream.accel)
 
-        profile = self.pipeline.start(config)
+        try:
+            profile = self.pipeline.start(config)
 
-        color_stream = profile.get_stream(rs.stream.color)
-        intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
-        self.cam_intrinsics = np.array(
-            [
-                [intrinsics.fx, 0.0, intrinsics.ppx],
-                [0.0, intrinsics.fy, intrinsics.ppy],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )[None, ...]
+            color_stream = profile.get_stream(rs.stream.color)
+            intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
+            self.cam_intrinsics = np.array(
+                [
+                    [intrinsics.fx, 0.0, intrinsics.ppx],
+                    [0.0, intrinsics.fy, intrinsics.ppy],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )[None, ...]
 
-        print("RealSense camera intrinsics:")
-        print(f"  Resolution: {intrinsics.width}x{intrinsics.height}")
-        print(f"  fx={intrinsics.fx:.2f}, fy={intrinsics.fy:.2f}")
-        print(f"  cx={intrinsics.ppx:.2f}, cy={intrinsics.ppy:.2f}")
+            print("RealSense camera intrinsics:")
+            print(f"  Resolution: {intrinsics.width}x{intrinsics.height}")
+            print(f"  fx={intrinsics.fx:.2f}, fy={intrinsics.fy:.2f}")
+            print(f"  cx={intrinsics.ppx:.2f}, cy={intrinsics.ppy:.2f}")
+
+            self._calibrate_gravity()
+        except Exception:
+            self._stop_pipeline_quietly()
+            raise
+
+    @staticmethod
+    def _is_frame_timeout_error(exc: RuntimeError) -> bool:
+        return "frame didn't arrive" in str(exc).lower()
+
+    def _stop_pipeline_quietly(self):
+        if self.pipeline is None:
+            return
+        try:
+            self.pipeline.stop()
+        except Exception:
+            pass
+
+    def _wait_for_frames_until(self, purpose: str, deadline: float):
+        last_error = None
+        next_notice = time.monotonic() + 5.0
+
+        while True:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                detail = f" Last RealSense error: {last_error}" if last_error else ""
+                raise RuntimeError(
+                    f"Timed out waiting for RealSense frames while {purpose}. "
+                    f"Requested {self.width}x{self.height}@{int(self._fps)} "
+                    f"with accel stream.{detail} "
+                    "Check that the camera is connected to a USB3 port, is not open "
+                    "in another process, and supports this color/IMU mode."
+                ) from last_error
+
+            timeout_ms = max(1, min(self.frame_timeout_ms, int(remaining_s * 1000)))
+            try:
+                return self.pipeline.wait_for_frames(timeout_ms)
+            except RuntimeError as exc:
+                if not self._is_frame_timeout_error(exc):
+                    raise
+
+                last_error = exc
+                now = time.monotonic()
+                if now >= next_notice:
+                    print(f"  Still waiting for RealSense frames while {purpose}...")
+                    next_notice = now + 5.0
+
+    def _calibrate_gravity(self):
+        rs = self.rs
 
         # Calibrate gravity direction (once, assuming camera is static)
-        print("Calibrating gravity direction (keep camera steady)...")
+        print(
+            f"Calibrating gravity direction ({self.imu_samples} IMU samples, keep camera steady)..."
+        )
         accel_samples = []
-        num_samples = 100
+        deadline = time.monotonic() + self.startup_timeout_s
+        next_notice = time.monotonic() + 5.0
 
-        for _ in range(num_samples):
-            frames = self.pipeline.wait_for_frames()
+        while len(accel_samples) < self.imu_samples:
+            frames = self._wait_for_frames_until("calibrating IMU gravity", deadline)
             accel_frame = frames.first_or_default(rs.stream.accel)
-            if accel_frame and len(accel_samples) < num_samples:
+            if accel_frame:
                 accel_data = accel_frame.as_motion_frame().get_motion_data()
                 accel_samples.append([accel_data.x, accel_data.y, accel_data.z])
+                continue
 
-        if len(accel_samples) < num_samples:
-            raise RuntimeError(
-                f"Failed to collect enough IMU samples: {len(accel_samples)}/{num_samples}"
-            )
+            now = time.monotonic()
+            if now >= deadline:
+                raise RuntimeError(
+                    "Timed out collecting RealSense IMU samples: "
+                    f"{len(accel_samples)}/{self.imu_samples}. "
+                    "Check that this camera has an accelerometer and that the accel stream "
+                    "is not blocked by another RealSense process."
+                )
+            if now >= next_notice:
+                print(
+                    "  Waiting for RealSense accel samples "
+                    f"({len(accel_samples)}/{self.imu_samples})..."
+                )
+                next_notice = now + 5.0
 
         accel_array = np.array(accel_samples, dtype=np.float64)
         gravity_avg = -np.mean(accel_array, axis=0)
@@ -191,15 +273,21 @@ class RealSenseSource(VideoSource):
         print(f"  Magnitude: {gravity_norm:.2f} m/s^2")
 
     def get_frame(self) -> tuple[np.ndarray, float]:
-        frames = self.pipeline.wait_for_frames()
-        color_frame = frames.get_color_frame()
-        if not color_frame:
-            return None, None
+        deadline = time.monotonic() + max(10.0, self.frame_timeout_ms / 1000.0)
+
+        while True:
+            frames = self._wait_for_frames_until("capturing color frame", deadline)
+            color_frame = frames.get_color_frame()
+            if color_frame:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for RealSense color frames")
+
         frame = np.asanyarray(color_frame.get_data())
         return frame, time.time()
 
     def release(self):
-        self.pipeline.stop()
+        self._stop_pipeline_quietly()
         self.pipeline = None
 
     @property

@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import time
+import os
 from typing import Optional, Union
 
 import cv2
@@ -135,12 +136,14 @@ class SAM3DBodyEstimator:
         if not batch_sizes:
             return
 
+        warmup_start = time.perf_counter()
         print(f"[SAM3DBodyEstimator] Warming up torch.compile for multi-person mode (batch_sizes={batch_sizes})...")
 
         img_size = self.cfg.MODEL.IMAGE_SIZE
         device = self.device
 
         for batch_size in batch_sizes:
+            batch_warmup_start = time.perf_counter()
             try:
                 # Create dummy batch for warmup
                 # Combined batch: body (N) + left_hand (N) + right_hand (N) = 3N
@@ -181,14 +184,23 @@ class SAM3DBodyEstimator:
                     )
 
                 torch.cuda.synchronize()
-                print(f"[SAM3DBodyEstimator] Warmup for batch_size={batch_size} completed")
+                print(
+                    f"[SAM3DBodyEstimator] Warmup for batch_size={batch_size} "
+                    f"completed in {time.perf_counter() - batch_warmup_start:.3f}s"
+                )
 
             except Exception as e:
-                print(f"[SAM3DBodyEstimator] Warmup for batch_size={batch_size} failed: {e}")
+                print(
+                    f"[SAM3DBodyEstimator] Warmup for batch_size={batch_size} "
+                    f"failed after {time.perf_counter() - batch_warmup_start:.3f}s: {e}"
+                )
                 import traceback
                 traceback.print_exc()
 
-        print("[SAM3DBodyEstimator] Multi-person compile warmup completed")
+        print(
+            "[SAM3DBodyEstimator] Multi-person compile warmup completed "
+            f"in {time.perf_counter() - warmup_start:.3f}s"
+        )
 
     @torch.no_grad()
     def process_one_image(
@@ -203,6 +215,8 @@ class SAM3DBodyEstimator:
         use_mask: bool = False,
         inference_type: str = "full",
         hand_box_source: str = "body_decoder",  # "body_decoder" or "yolo_pose"
+        yolo_pose_keypoints: Optional[np.ndarray] = None,
+        yolo_pose_body_boxes: Optional[np.ndarray] = None,
     ):
         """
         Perform model prediction in top-down format: assuming input is a full image.
@@ -222,6 +236,11 @@ class SAM3DBodyEstimator:
                 - body_decoder: use hand boxes from body decoder output (default)
                 - yolo_pose: use hand boxes computed from YOLO-Pose wrist keypoints
                   (requires detector to be yolo_pose type)
+            yolo_pose_keypoints:
+                Optional pre-computed YOLO-Pose keypoints [N, 17, 3]. Useful for
+                warming up the yolo_pose hand-box path without running the detector.
+            yolo_pose_body_boxes:
+                Optional body boxes paired with yolo_pose_keypoints.
         """
         process_total_start = time.time()
         print("      [process_one_image] Starting...")
@@ -231,11 +250,12 @@ class SAM3DBodyEstimator:
         self.image_embeddings = None
         self.output = None
         self.prev_prompt = []
-        try:
-            torch.cuda.empty_cache()
-        except RuntimeError as e:
-            # If state is corrupted after CUDA Graph capture failure, skip empty_cache
-            print(f"        [process_one_image] Warning: empty_cache failed: {e}")
+        if os.environ.get("SAM3D_EMPTY_CACHE_EACH_FRAME", "0") == "1":
+            try:
+                torch.cuda.empty_cache()
+            except RuntimeError as e:
+                # If state is corrupted after CUDA Graph capture failure, skip empty_cache.
+                print(f"        [process_one_image] Warning: empty_cache failed: {e}")
 
         t0 = time.time()
         if type(img) == str:
@@ -248,10 +268,10 @@ class SAM3DBodyEstimator:
         print(f"        [process_one_image] load_image: {time.time() - t0:.4f}s")
 
         t0 = time.time()
-        yolo_pose_keypoints = None  # Will be set if using yolo_pose detector
-        yolo_pose_body_boxes = None
         if bboxes is not None:
             boxes = bboxes.reshape(-1, 4)
+            if yolo_pose_body_boxes is None and yolo_pose_keypoints is not None:
+                yolo_pose_body_boxes = boxes.copy()
             self.is_crop = True
         elif self.detector is not None:
             if image_format == "rgb":

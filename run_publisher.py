@@ -103,13 +103,6 @@ class RealtimePublisher:
         else:
             self.frame_width, self.frame_height = frame_size
 
-        self.rerun_viz = None
-        self._rerun_frame_idx = 0
-        self.rerun_log_stride = max(1, int(rerun_log_stride))
-
-        logger.info("Warming up model...")
-        self._warmup()
-
         cam_intrinsics_np = self.video_source.get_camera_intrinsics()
         if cam_intrinsics_np is not None:
             self.cam_intrinsics = torch.from_numpy(
@@ -121,6 +114,13 @@ class RealtimePublisher:
         else:
             self.cam_intrinsics = None
             logger.warning("No camera intrinsics provided, will use FOV estimator")
+
+        self.rerun_viz = None
+        self._rerun_frame_idx = 0
+        self.rerun_log_stride = max(1, int(rerun_log_stride))
+
+        logger.info("Warming up model...")
+        self._warmup()
 
         if rerun:
             logger.info("Initializing Rerun visualization...")
@@ -168,8 +168,8 @@ class RealtimePublisher:
             logger.info(f"Recording enabled. Saving to: {self.session_dir}")
 
             intrinsics_data = {
-                "width": 848,
-                "height": 480,
+                "width": self.frame_width,
+                "height": self.frame_height,
                 "gravity": self.gravity_direction.tolist(),
             }
             if cam_intrinsics_np is not None:
@@ -274,6 +274,7 @@ class RealtimePublisher:
         logger.success("Publisher ready")
 
     def _warmup(self):
+        warmup_start = time.perf_counter()
         frame_size = self.video_source.get_frame_size()
         if frame_size is None:
             width, height = 640, 480
@@ -284,14 +285,36 @@ class RealtimePublisher:
         warmup_bbox = np.array(
             [[0.0, 0.0, float(width - 1), float(height - 1)]], dtype=np.float32
         )
+        warmup_keypoints = np.zeros((1, 17, 3), dtype=np.float32)
+        warmup_keypoints[0, 9] = [width * 0.35, height * 0.48, 1.0]
+        warmup_keypoints[0, 10] = [width * 0.65, height * 0.48, 1.0]
+
+        if self.estimator.detector is not None:
+            dummy_bgr = cv2.cvtColor(dummy_img, cv2.COLOR_RGB2BGR)
+            for _ in range(2):
+                _ = self.estimator.detector.run_human_detection(
+                    dummy_bgr,
+                    bbox_thr=0.01,
+                    nms_thr=0.3,
+                    default_to_full_image=False,
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
         for _ in range(2):
             _ = self.estimator.process_one_image(
                 dummy_img,
                 bboxes=warmup_bbox,
-                hand_box_source="body_decoder",
+                cam_int=self.cam_intrinsics,
+                hand_box_source="yolo_pose",
+                yolo_pose_keypoints=warmup_keypoints,
+                yolo_pose_body_boxes=warmup_bbox,
             )
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
+        logger.info(
+            f"Model warmup completed in {time.perf_counter() - warmup_start:.3f}s"
+        )
 
     def _capture_loop(self):
         while self.running:
@@ -844,6 +867,36 @@ def main():
         help="Disable loop video playback (for --source video)",
     )
     parser.add_argument(
+        "--camera-width",
+        type=int,
+        default=640,
+        help="RealSense color stream width for --source camera",
+    )
+    parser.add_argument(
+        "--camera-height",
+        type=int,
+        default=480,
+        help="RealSense color stream height for --source camera",
+    )
+    parser.add_argument(
+        "--camera-fps",
+        type=int,
+        default=15,
+        help="RealSense color stream FPS for --source camera",
+    )
+    parser.add_argument(
+        "--camera-imu-samples",
+        type=int,
+        default=100,
+        help="RealSense accel samples used for startup gravity calibration",
+    )
+    parser.add_argument(
+        "--camera-startup-timeout-s",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for RealSense color/IMU frames during camera startup",
+    )
+    parser.add_argument(
         "--publish-hz", type=float, default=50.0, help="Publisher output rate in Hz"
     )
     parser.add_argument(
@@ -1039,6 +1092,16 @@ def main():
         parser.error("--interp-lag-ms must be >= 0")
     if args.imu_level_init_frames < 0:
         parser.error("--imu-level-init-frames must be >= 0")
+    if args.camera_width <= 0:
+        parser.error("--camera-width must be > 0")
+    if args.camera_height <= 0:
+        parser.error("--camera-height must be > 0")
+    if args.camera_fps <= 0:
+        parser.error("--camera-fps must be > 0")
+    if args.camera_imu_samples <= 0:
+        parser.error("--camera-imu-samples must be > 0")
+    if args.camera_startup_timeout_s <= 0:
+        parser.error("--camera-startup-timeout-s must be > 0")
 
     if args.source in ("camera", "video"):
         missing_model_args = [
@@ -1056,7 +1119,14 @@ def main():
             )
 
     if args.source == "camera":
-        video_source = create_video_source("camera", width=848, height=480, fps=30)
+        video_source = create_video_source(
+            "camera",
+            width=args.camera_width,
+            height=args.camera_height,
+            fps=args.camera_fps,
+            imu_samples=args.camera_imu_samples,
+            startup_timeout_s=args.camera_startup_timeout_s,
+        )
         publisher = RealtimePublisher(
             video_source=video_source,
             publish_hz=args.publish_hz,

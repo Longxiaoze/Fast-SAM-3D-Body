@@ -2,6 +2,52 @@
 
 This file summarizes the current single-camera online and offline workflows for this repo.
 
+Quickly run
+``` bash
+cd /home/longxiaoze/liu_projects/Fast-SAM-3D-Body
+source /home/longxiaoze/anaconda3/etc/profile.d/conda.sh
+conda activate fast_sam_3d_body
+SMPL_MODEL=/home/longxiaoze/liu_projects/smpl_inputs/checkpoints/body_models/smpl/SMPL_NEUTRAL.pkl
+NN_MODEL_DIR=/home/longxiaoze/liu_projects/Fast-SAM-3D-Body/mhr2smpl/experiments/multiview_n30000_e500
+MAPPING_PATH=/home/longxiaoze/liu_projects/Fast-SAM-3D-Body/mhr2smpl/data/mhr2smpl_mapping.npz
+MHR_MESH_PATH=/home/longxiaoze/liu_projects/Fast-SAM-3D-Body/checkpoints/mhr_face_mask.ply
+SMOOTHER_DIR=/home/longxiaoze/liu_projects/Fast-SAM-3D-Body/mhr2smpl/experiments/smoother_w5
+conda activate fast_sam_3d_body
+cd /home/longxiaoze/liu_projects/Fast-SAM-3D-Body/
+USE_COMPILE=0 python run_publisher.py \
+    --source camera \
+    --camera-width 640 \
+    --camera-height 480 \
+    --camera-fps 30 \
+    --smpl-model-path "$SMPL_MODEL" \
+    --nn-model-dir "$NN_MODEL_DIR" \
+    --mhr2smpl-mapping-path "$MAPPING_PATH" \
+    --mhr-mesh-path "$MHR_MESH_PATH" \
+    --smoother-dir "$SMOOTHER_DIR" \
+    --zmq-protocol-version 3 \
+    --imu-level-init-frames 20 \
+    --rerun \
+    --rerun-log-stride 2 \
+    --rerun-mesh-overlay-stride 1 \
+    --addr tcp://*:5556
+```
+
+
+``` bash
+cd /home/longxiaoze/liu_projects/unitree_projects/GR00T-WholeBodyControl
+source .venv_sim/bin/activate
+python gear_sonic/scripts/run_sim_loop.py
+```
+
+``` bash
+cd /home/longxiaoze/liu_projects/unitree_projects/GR00T-WholeBodyControl/gear_sonic_deploy
+bash deploy.sh \
+  --input-type zmq \
+  --obs-config /home/longxiaoze/liu_projects/Fast-SAM-3D-Body/configs/sonic/observation_config_smpl_anchor_only.yaml \
+  sim
+```
+
+
 ## Environment
 
 All commands below assume:
